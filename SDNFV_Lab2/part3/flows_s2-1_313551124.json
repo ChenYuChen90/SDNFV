@@ -1,0 +1,21 @@
+{
+    "priority": 45000,
+    "timeout": 0,
+    "isPermanent": true,
+    "treatment": {
+      "instructions": [
+        {
+          "type": "OUTPUT",
+          "port": "ALL"
+        }
+      ]
+    },
+    "selector": {
+      "criteria": [
+        {
+          "type": "ETH_TYPE",
+          "ethType": "0x0806"
+        }
+      ]
+    }
+  }
