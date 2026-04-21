@@ -113,3 +113,105 @@ Lab 5 的成果在於你成功把前幾次 lab 的 controller 視角擴展到 NF
 
 ### 總結
 Lab 5 是整門課最接近系統整合的一次實作。從現有檔案可清楚看出，你已完成多 router、多 host 的 Docker 拓樸、FRR BGP 鄰居關係、FPM 對 ONOS 匯出，以及 OVS bridge 與 controller 之間的整合。和前幾次 lab 相比，這次更強調服務編排、虛擬化與控制平面整合，是 SDN 與 NFV 結合的代表作。
+---
+
+## Final Project: SDN-enabled Virtual Router
+
+### 專題目標
+Final project 的主題是把前面各次 lab 累積的能力整合成一個可運作的 SDN 虛擬路由器。根據 [SDNNFVProject.pptx](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\SDNNFVProject.pptx:1>)，專題要求不只是完成單一 ONOS app，而是要在自己的 SDN 網域中同時處理 `intra-domain traffic`、`inter-domain traffic` 與 `transit traffic`，並且同時支援 IPv4 與 IPv6。整體精神是用 ONOS 控制的 OpenFlow 網路與虛擬化元件，模擬傳統 router、gateway 與 ISP edge 的行為。
+
+### 專題核心概念
+這個專題最重要的概念是 `virtual router`。在一般網路中，邊界 router 需要直接和外部 router 建立 BGP session、維護 routing table，並在資料平面上進行轉送與 MAC 改寫；而在這個專題中，BGP 與 route exchange 交給 FRRouting container，真正的資料平面控制則由 ONOS 和 OVS 來完成。換句話說，FRR 負責 control plane，ONOS 依據學到的 route 安裝 intent 或 flow rule，讓整個 SDN 網路看起來像一台虛擬路由器。
+
+另一個關鍵概念是 `virtual gateway`。對內部主機來說，它們看到的是一個邏輯上的 gateway IP 與 gateway MAC，而不是一台真正的實體 router。當主機將封包送給 gateway MAC 後，controller 再根據封包目的 IP、route lookup 與 next hop 決定封包應該送往何處，並在必要時重寫 source/destination MAC。這個概念正是本專題和前面 lab 最大的差異之一。
+
+### 拓樸與部署架構
+從 [final_project/code/docker-compose.yml](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\docker-compose.yml:1>) 可看出，專題目前的部署骨架至少包含：
+
+- 一個 ONOS controller
+- 兩台 host containers：`h1`、`h2`
+- 兩台 FRRouting containers：`r1`、`r2`
+
+其中 `h2` 與 `r2` 已配置在 `172.17.55.0/24` 與 `2a0b:4e07:c4:155::/64` 子網，對應簡報中 AS65xx1 那一側的網域。`r1` 則扮演本組的 BGP speaker，預期還要接到 OVS、VXLAN 與 TA/IXP 網段。這種架構說明 final project 並不只是本地單一容器測試，而是要把本組 SDN 網域接到外部世界。
+
+此外，`final_project` 根目錄已經有 [makefile](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\makefile:1>)，顯示專案有朝著簡報要求的 `make deploy` 與 `make clean` 方向整理。輔助腳本方面，目前 [topo_utils.sh](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\supplement\topo_utils.sh:1>) 已經提供建立 container、veth、bridge、OVS 連線等工具函式，但最後仍保留 `# TODO Write your own code`，代表實際拓樸搭建仍屬於半成品或待補區塊。另外 [wg0.conf](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\supplement\wg0.conf:1>) 也說明這個專題原本打算先透過 WireGuard 接到 TA server，再在其上建立 VXLAN。
+
+### FRRouting、BGP 與 FPM 設定
+在 routing control plane 方面，現有設定已經對應簡報中的要求。[config/daemons](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\config\daemons:1>) 同時啟用 `zebra` 與 `bgpd`，並在 `zebra_options` 中加入 `-M fpm`，表示 Zebra 會將 FIB 推送給 ONOS 的 FPM app。這正好對應簡報中「Use ONOS built-in FPM to collect FIB from zebra」的說明。
+
+R1 的 [frr.conf](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\config\R1\frr.conf:1>) 顯示它使用 AS 65550，並和 `192.168.63.2`、`192.168.64.2`、`192.168.70.253` 建立 IPv4 eBGP neighbors，同時也和 `fd63::2`、`fd70::fe` 建立 IPv6 neighbors。它宣告本組 prefix `172.16.55.0/24` 與 `2a0b:4e07:c4:55::/64`，而且和 IXP 連線時使用簡報指定的 BGP password `winlab.nycu`。這表示本組的 FRR 設定已經把對外 route exchange 需要的基本條件都放進去了。
+
+R2 的 [frr.conf](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\config\R2\frr.conf:1>) 則代表另一個 customer/transit 側的 AS，宣告 `172.17.55.0/24` 與 `2a0b:4e07:c4:155::/64`。R1 與 R2 的關係對應簡報中的 AS65xx0 與 AS65xx1 架構，也代表 final project 繼承了 Lab 5 中 `FRR + BGP + FPM` 的能力。
+
+### ONOS App 設計
+專題的核心 ONOS app 是 [final_project/code/vrouter](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter:1>)。從 [pom.xml](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter\pom.xml:1>) 可以看出這個 app 名稱是 `nycu.winlab.vrouter`，並額外引入 `onos-apps-route-service-api`，說明它會直接依賴 `RouteService` 來讀取 ONOS 收到的 routing information。
+
+主程式 [AppComponent.java](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter\src\main\java\nycu\winlab\vrouter\AppComponent.java:159>) 啟動後會：
+
+- 註冊自己的 app 與 network config factory
+- 向 ONOS 請求 IPv4 與 IPv6 packet-in
+- 註冊 `RouteListener` 監聽 route event
+
+程式中同時使用了 `PacketService`、`IntentService`、`RouteService`、`InterfaceService`、`HostService`、`EdgePortService` 與 `FlowRuleService`，這代表 final project 不是單純用一種 ONOS abstraction，而是把多種 service 組合在一起，完成虛擬 router 的多層邏輯。
+
+### 設定檔與 router 參數
+`vrouter` 的設定格式定義在 [VConfig.java](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter\src\main\java\nycu\winlab\vrouter\VConfig.java:1>)。其中可讀出的欄位包括：
+
+- `frr`：FRR connect point
+- `frr-mac`
+- `gateway-ip4` / `gateway-ip6`
+- `gateway-mac`
+- `v4-peers` / `v6-peers`
+- `ta-gateway-ip4` / `ta-gateway-ip6`
+- `ta-domain-ip4` / `ta-domain-ip6`
+
+而 [cfg.json](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\cfg.json:1>) 則是這份設定的實際輸入，裡面除了 interface 配置外，也同時提供了本組 virtual gateway、FRR connect point、對 TA 的 gateway、對 peer AS 的連線資訊，以及 `nycu.winlab.ProxyArp` 所需的虛擬 ARP 參數。這表示專案原始設計上是打算讓 `vrouter` 與 `ProxyArp` 兩個 app 協同運作，而不是所有功能都塞進單一 app 中。
+
+### BGP speaker 與 peer 之間的封包轉送
+收到 config 後，`AppComponent` 會呼叫 `BGPConnection()`，這段程式位於 [AppComponent.java](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter\src\main\java\nycu\winlab\vrouter\AppComponent.java:246>)。做法是把 `v4-peers` 與 `v6-peers` 中的 IP 成對拆開，再透過 `InterfaceService` 找出對應的 WAN connect point，接著安裝兩個方向的 `PointToPointIntent`，讓 FRR 的 connect point 和 WAN connect point 之間能正確交換 BGP 封包。
+
+這段邏輯直接對應簡報中「Delegate BGP Speaker IP to WAN Connect Point」與「Route packet between BGP speaker connect point and WAN connect point」的需求。換句話說，即便 FRR container 沒有物理上直接接到所有 peer，仍能透過 SDN fabric 建立 BGP L3 連通性。
+
+### Intra-domain 流量處理
+對於同一個 SDN domain 內的主機互通，`vrouter` app 沿用了 Lab 3 的 learning bridge 思想。`processIntraDomain()` 位於 [AppComponent.java](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter\src\main\java\nycu\winlab\vrouter\AppComponent.java:473>)，它會維護一張 `bridgeTable`，記錄各交換器上的 `MAC -> port` 對應。當目的 MAC 尚未知時就 flood；若已知目的 MAC 所在 port，就建立對應的 `PointToPointIntent`。
+
+這表示專題中的 intra-domain forwarding 並不是重新發明一套新東西，而是把 Lab 3 的 L2 forwarding 能力內化到 final app 中，作為內部流量的基礎。
+
+### Inter-domain 與 Virtual Gateway 邏輯
+較重要的 router 行為出現在 `processExternalIn()` 與 `processExternalOut()`，[AppComponent.java](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter\src\main\java\nycu\winlab\vrouter\AppComponent.java:336>)、[AppComponent.java](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter\src\main\java\nycu\winlab\vrouter\AppComponent.java:414>)。
+
+在 `processExternalOut()` 中，程式會根據目的 IP 使用 `RouteService.longestPrefixLookup()` 找到最佳 route，再取出 next hop IP，透過 `InterfaceService` 找出 next hop 所在的出口 connect point，並安裝 intent，同時把 destination MAC 改成 next hop 的 MAC、source MAC 改成 virtual gateway 的 MAC。這是典型的 gateway forwarding 行為，也就是主機只知道把封包交給 gateway，但真正要送給哪個 next hop、要換成什麼 MAC，是由 controller 來決定。
+
+在 `processExternalIn()` 中，程式則是針對從 FRR 或外部進入本網域的封包，嘗試找到對應的內部 host，然後把封包導向該主機所在的 connect point，並重新設定 MAC。這一段是 inter-domain traffic 能正常進入 SDN domain 的核心。
+
+### Transit 流量處理
+Transit forwarding 由 `TransitProcessor` 負責，它實作 `RouteListener`，[AppComponent.java](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter\src\main\java\nycu\winlab\vrouter\AppComponent.java:510>)。當 route 新增或更新時，程式會呼叫 `installTransitIntent()`，從 `RouteService` 取出所有 route tables 與最佳 route，再用 `InterfaceService` 檢查每個 interface 的 subnet，排除 next hop 所在區段後，把其餘入口整理成 ingress set，最後建立 `MultiPointToSinglePointIntent` 匯聚到對應的出口。
+
+從概念上來看，這一段是在模擬 transit ISP 的角色：只要 ONOS 知道某個 prefix 應該走哪個 next hop，就讓其他入口的流量全部往那個出口送。這和簡報中 transit traffic 的說明完全一致，也延續了 Lab 4 對 intent 的使用經驗。
+
+### IPv6 與 NDP 能力
+Final project 明確要求 IPv4/IPv6 dual stack，因此這份 code 也實際加入了 IPv6 邏輯，而不只是停在欄位宣告。除了在 packet processor 中攔截 IPv6 封包、做 IPv6 route lookup 之外，還有 `floodNdp()` 與 `floodArp()` 兩個工具函式，[AppComponent.java](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\vrouter\src\main\java\nycu\winlab\vrouter\AppComponent.java:720>)，會主動送出 Neighbor Solicitation 與 ARP Request，以發現 peer 或 next hop 的 MAC。
+
+這表示開發者已經意識到在 dual-stack router 中，不能只處理 IPv4 ARP，還必須處理 IPv6 的鄰居發現。這部分與簡報中介紹的 NDP extension 方向一致。
+
+### ProxyArp 的角色
+雖然 `vrouter` 裡已經有部分 ARP/NDP 輔助邏輯，但從 [cfg.json](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\code\cfg.json:1>) 中存在 `nycu.winlab.ProxyArp` 設定，以及 `final_project/lab3_313551124/proxyarp` 仍保留完整程式碼這件事來看，專題原本應該是預期把 Lab 3 的 Proxy ARP 也整合進 final project。參考程式在 [final_project/lab3_313551124/proxyarp/AppComponent.java](<c:\Users\nss-yuchen\Desktop\113-1\SDN\final_project\lab3_313551124\proxyarp\src\main\java\nycu\winlab\proxyarp\AppComponent.java:61>)，其邏輯包括：
+
+- controller 學習 `IP -> MAC` 對應
+- ARP miss 時 flood 到 edge ports
+- ARP hit 時直接代答 ARP reply
+
+因此，若從專題完整設計來看，較合理的架構是由 `ProxyArp` 處理 gateway/peer 的 ARP 與 NDP 問題，再由 `vrouter` 專心負責 routing 與 forwarding。
+
+### 專題成果與現況評估
+從現有檔案整體來看，這個 final project 並不是空白，而是已經具有一份頗完整的原型：
+
+- 有完整的專題簡報與規格說明
+- 有 `makefile`、compose、FRR 設定、WireGuard/VXLAN 補充資訊
+- 有 `vrouter` app，而且內含 BGP peer forwarding、intra-domain learning、inter-domain forwarding、transit intent 與 IPv6/NDP 邏輯
+- 有來自 `lab3_313551124` 的 `ProxyArp` 可作為 final project 內 gateway 鄰居解析的直接參考
+
+不過，它看起來更像是一份「整理後很有內容的半成品」或「可說明架構的 prototype」，而不是保證能立即一鍵 demo 的完成品。主要原因在於完整拓樸腳本仍待補、`code` 目錄下尚未正式整合 `ProxyArp` app、以及 `vrouter` 內部若要真正穩定運作，仍需要實機測試與細節修正。
+
+### 總結
+Final project 可以視為整門 SDN/NFV 課程的綜合應用。它把 Lab 3 的 `Learning Bridge` 與 `Proxy ARP`、Lab 4 的 `Intent-based forwarding`、Lab 5 的 `FRR/BGP/FPM` 整合起來，最終目標是形成一個可以在 SDN fabric 中模擬傳統 router 行為的虛擬路由器。就你目前保留下來的 `final_project` 檔案而言，雖然不一定完全可執行，但在架構與實作方向上已經相當完整，也足以清楚說明這個 final project 實際上做了什麼。

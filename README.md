@@ -67,3 +67,14 @@
 - FRRouting 設定 BGP（multi-AS）  
 - FPM → ONOS routing integration  
 - OVS + ONOS 控制資料平面  
+
+---
+
+## Final Project – SDN-enabled Virtual Router
+
+- 整合 Learning Bridge、Proxy ARP、Intent 與 FRRouting/BGP  
+- 使用 ONOS app 實作 vRouter 基本邏輯  
+- 設定 virtual gateway（IPv4 / IPv6）  
+- 處理 intra-domain、inter-domain、transit traffic  
+- 透過 RouteService / FPM 取得 routing 資訊  
+- 使用 Docker、FRR、OVS 與補充腳本建立專題環境  
